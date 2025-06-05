@@ -116,6 +116,10 @@ function [A, B, K] = linearise_system(x0, u0)
 
     model = ss(A, B, eye(6, 6), []);
 
+    G = tf(model);
+    G.InputName = {'T_x', 'T_y', 'T_z'};
+    G.OutputName = {'\theta_1', '\theta_2', '\theta_3', '\omega_1', '\omega_2', '\omega_3'};
+
     K = place(A, B, [-1 -2 -3 -4 -5 -6]);
 
     aug_model = ss(A-B*K, B, eye(6, 6), []);
@@ -193,7 +197,7 @@ function [] = simulate_system_ekf(x0, u, dt)
     u = sym('u', [3 1], 'real');
     t = sym('t');
 
-    dx = dynamic_model_noise(t, x, -1000.*K*x, w);  % Symbolic dynamics model
+    dx = dynamic_model_noise(t, x, u, w);  % Symbolic dynamics model
     z = measurement_model(t, x, v);  % Symbolic measurement model
 
     F_x_sym = jacobian(dx, x);            % Symbolic Jacobian wrt x
@@ -203,17 +207,17 @@ function [] = simulate_system_ekf(x0, u, dt)
     H_v_sym = jacobian(z, v);            % Symbolic Jacobian wrt w
 
     % Dynamics Jacobian
-    F_x = matlabFunction(F_x_sym, 'Vars', {t, x, w});
-    F_w = matlabFunction(F_w_sym, 'Vars', {t, x, w});
+    F_x = matlabFunction(F_x_sym, 'Vars', {t, x, u, w});
+    F_w = matlabFunction(F_w_sym, 'Vars', {t, x, u, w});
 
     % Measurement Jacobian
     H_x = matlabFunction(H_x_sym, 'Vars', {t, x, v});
     H_v = matlabFunction(H_v_sym, 'Vars', {t, x, v});
 
     epsilon = 1e-10;
-    epsilon2 = 1e-2;
-    m = 1;  % Number of states
-    n = 1;  % Number of control inputs
+    epsilon2 = 1e-1;
+    m = 0;  % Number of states
+    n = 1e-1;  % Number of control inputs
     % Process noise covariance (of w)
     Q = diag([epsilon*m, epsilon*m, epsilon*m, epsilon*m, epsilon*m, epsilon*m]);
 
@@ -221,7 +225,7 @@ function [] = simulate_system_ekf(x0, u, dt)
     R = diag([epsilon2*n, epsilon2*n, epsilon2*n, epsilon2*n, epsilon2*n, epsilon2*n]);
     b = [0; 0; 0; 0.2; -0.2; 0.15];
 
-    P_kk = epsilon * eye(6, 6);  % Initial covariance estimate
+    P_kk =  0.1*eye(6, 6);  % Initial covariance estimate
 
     % Initialize state vector
     x = x0;
@@ -234,15 +238,15 @@ function [] = simulate_system_ekf(x0, u, dt)
 -0.9835    0.0097   -6.0186   -0.2255    0.0059 -2.7198];
 
     x_real = [x0];
-    x_kk = x0;  % Initial estimate
-    x_predicted = [x_kk];
+    x_kk = x0*2;  % Initial estimate
+    x_predicted = [x_kk]; %#ok<*NBRAK2>
     x_measured =[x_kk];
     t_real = [0];
     
 
-    for i = 1:400
+    for i = 1:1600
         % Calculate control input
-        u_kk = -1000.*K*x;
+        u_kk = -1000.*K*x_kk;
 
         % Simulate the system for one time step
         [t, x] = ode45(@(t, x) dynamic_model(t, x, u_kk), ...
@@ -256,7 +260,7 @@ function [] = simulate_system_ekf(x0, u, dt)
         % Simulate measurement with noise
         v = (randn(6, 1) .* sqrt([epsilon2, epsilon2, epsilon2, epsilon2, epsilon2, epsilon2]')) + b;
         z_k1 = measurement_model(t, x, v);
-        x_measured = [x_measured z_k1]; 
+        x_measured = [x_measured z_k1]; %#ok<*AGROW>
 
         % Get best estimate from EKF
         [x_kk, P_kk] = ekf(x_kk, u_kk, z_k1, dt, P_kk, F_x, F_w, H_x, H_v, Q, R);
@@ -264,16 +268,24 @@ function [] = simulate_system_ekf(x0, u, dt)
 
     end
     figure;
+    state_names = {'\theta_1', '\theta_2', '\theta_3', '\omega_1', '\omega_2', '\omega_3'};
     for i = 1:6
-        subplot(3,2,i);
+        if i <= 3
+            subplot(3,2, (i-1)*2+1);
+        else
+            subplot(3,2, (i-4)*2+2);
+        end
         plot(t_real, x_real(i, :), ...
-             t_real, x_predicted(i, :), ...
-             t_real, x_measured(i, :), '--');
-        legend('Real', 'EKF Predicted');
+            t_real, x_predicted(i, :), ...
+            t_real(1:5:end), x_measured(i, 1:5:end), '--');
+        legend('Real', 'EKF Predicted', 'Measurement');
         grid on;
-        xlabel('Time (s)');
-        ylabel(['State ', num2str(i)]);
-        title(['State ', num2str(i), ' vs Time']);
+        xlabel('Time [s]');
+        if i <= 3
+            ylabel([state_names{i} ' [rad]']);
+        else
+            ylabel([state_names{i} ' [rad/s]']);
+        end
         grid on;
     end
 end
@@ -290,16 +302,17 @@ function [x_kk, P_kk] = ekf(x_kk, u_k1, z_k1, dt, P_kk, F_x, F_w, H_x, H_v, Q, R
 
     
     % CORRECTION STEP
-    [x_kk, P_kk] = ekf_correction(x_k1k, z_k1k, P_k1k, H_x, H_v, z_k1, R);
+    [x_kk, P_kk] = ekf_correction(dt, x_k1k, z_k1k, P_k1k, H_x, H_v, z_k1, R);
 
 end
 
 function [x_k1k, z_k1k, P_k1k] = ekf_predict(dt, x_kk, u_k1, P_kk, F_x, F_w, Q)
     % Predict next state
     [~, x_ode] = ode45(@(t, x) dynamic_model(t, x, u_k1), [0, dt], x_kk);
-    x_k1k = x_ode(end, :)';  
+    x_k1k = x_ode(end, :)'
     % Predict covariance estimate
-    Fx_k = F_x(0, x_k1k, zeros(6, 1));
+    Fx_k = dt.*F_x(0, x_k1k, u_k1, zeros(6, 1)) + eye(6, 6);
+    Fw_k = dt.*F_w(0, x_k1k, u_k1, zeros(6, 1)) + eye(6, 6);
     % Fw_k = F_w(0, x_k1k, u_k1, zeros(6, 1));
     P_k1k = Fx_k * P_kk * Fx_k' + Q;
     % Predict measurement
@@ -307,7 +320,7 @@ function [x_k1k, z_k1k, P_k1k] = ekf_predict(dt, x_kk, u_k1, P_kk, F_x, F_w, Q)
 
 end
 
-function [x_k1k1, P_k1k1] = ekf_correction(x_k1k, z_k1k, P_k1k, H_x, H_v, z_k1, R)
+function [x_k1k1, P_k1k1] = ekf_correction(dt, x_k1k, z_k1k, P_k1k, H_x, H_v, z_k1, R)
     % This function performs the correction step of the Extended Kalman Filter (EKF)
     % x_k1k - predicted state vector
     % z_k1k - predicted measurement vector
@@ -315,15 +328,19 @@ function [x_k1k1, P_k1k1] = ekf_correction(x_k1k, z_k1k, P_k1k, H_x, H_v, z_k1, 
     % z_k1 - actual measurement vector
     % R - measurement noise covariance matrix
 
-    H_x_k1 = H_x(0, x_k1k, zeros(6, 1));
-    S_k1 = H_x_k1 * P_k1k * H_x_k1' + R;
+    H_x_k1 = dt * H_x(0, x_k1k, zeros(6, 1)) + eye(6, 6);
+    H_w_k1 = dt * H_v(0, x_k1k, zeros(6, 1)) + eye(6, 6);
+    S_k1 = H_x_k1 * P_k1k * H_x_k1' +  H_w_k1 * R * H_w_k1'; 
     K_k1 = P_k1k * H_x_k1' * pinv(S_k1);
     x_k1k1= x_k1k + K_k1 * (z_k1 - z_k1k);
-    P_k1k1 = P_k1k - K_k1 * S_k1 * K_k1';
+    %P_k1k1 = (eye(size(K_k1*H_x_k1)) - K_k1*H_x_k1)*P_k1k;
+    tmp = K_k1*H_x_k1;
+    I = eye(size(tmp));
+    P_k1k1 = (I - tmp) * P_k1k * (I - tmp)' + K_k1 * R * K_k1';
 
 end
 
 angle_0 = 10/180*pi;  % Initial angle in radians
-simulate_system_ekf([angle_0; angle_0; angle_0; 0; 0; 0], [0; 0; 0], 0.1);
+simulate_system_ekf([angle_0; angle_0; angle_0; 0.01; 0.01; 0.01], [0; 0; 0], 0.01);
 
 % linearise_system([0; 0; 0; 0; 0; 0], [0; 0; 0]);
