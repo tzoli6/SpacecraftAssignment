@@ -215,17 +215,18 @@ function [] = simulate_system_ekf(x0, u, dt)
     H_v = matlabFunction(H_v_sym, 'Vars', {t, x, v});
 
     epsilon = 1e-10;
-    epsilon2 = 1e-1;
-    m = 0;  % Number of states
-    n = 1e-1;  % Number of control inputs
+    epsilon2 = 0.1^2;
+    m = 1;
+    n = 1;
     % Process noise covariance (of w)
     Q = diag([epsilon*m, epsilon*m, epsilon*m, epsilon*m, epsilon*m, epsilon*m]);
 
     % Measurement noise covariance (of v)
     R = diag([epsilon2*n, epsilon2*n, epsilon2*n, epsilon2*n, epsilon2*n, epsilon2*n]);
+    measurement_noise = [0.1, 0.1, 0.1, 0, 0, 0]';
     b = [0; 0; 0; 0.2; -0.2; 0.15];
 
-    P_kk =  0.1*eye(6, 6);  % Initial covariance estimate
+    P_kk =  R;  % Initial covariance estimate
 
     % Initialize state vector
     x = x0;
@@ -258,7 +259,7 @@ function [] = simulate_system_ekf(x0, u, dt)
         t_real = [t_real t];
 
         % Simulate measurement with noise
-        v = (randn(6, 1) .* sqrt([epsilon2, epsilon2, epsilon2, epsilon2, epsilon2, epsilon2]')) + b;
+        v = (randn(6, 1) .* measurement_noise) + b;
         z_k1 = measurement_model(t, x, v);
         x_measured = [x_measured z_k1]; %#ok<*AGROW>
 
@@ -267,29 +268,40 @@ function [] = simulate_system_ekf(x0, u, dt)
         x_predicted = [x_predicted x_kk];
 
     end
-    figure;
-    state_names = {'\theta_1', '\theta_2', '\theta_3', '\omega_1', '\omega_2', '\omega_3'};
-    for i = 1:6
-        if i <= 3
-            subplot(3,2, (i-1)*2+1);
-        else
-            subplot(3,2, (i-4)*2+2);
-        end
-        plot(t_real, x_real(i, :), ...
-            t_real, x_predicted(i, :), ...
-            t_real(1:5:end), x_measured(i, 1:5:end), '--');
-        legend('Real', 'EKF Predicted', 'Measurement');
-        grid on;
-        xlabel('Time [s]');
-        if i <= 3
-            ylabel([state_names{i} ' [rad]']);
-        else
-            ylabel([state_names{i} ' [rad/s]']);
-        end
-        grid on;
-    end
-end
+        figure;
+        set(gcf, 'Position', [100, 100, 900, 1800]); % Taller, elongated in y
+        state_names = {'$\theta_1$', '$\theta_2$', '$\theta_3$', '$\omega_1$', '$\omega_2$', '$\omega_3$'};
+        colors = lines(3); % Use distinguishable colors
+        for i = 1:6
+            subplot(6,1,i); % 6 rows, 1 column: all subplots stacked vertically
+            hold on;
+            h1 = plot(t_real, x_real(i, :), '-', 'Color', colors(1,:), 'LineWidth', 2);
+            h2 = plot(t_real, x_predicted(i, :), '-', 'Color', colors(2,:), 'LineWidth', 2);
+            h3 = plot(t_real(1:5:end), x_measured(i, 1:5:end), '--o', ...
+                'Color', colors(3,:), 'MarkerSize', 3, 'LineWidth', 0.7);
+            hold off;
+            grid on;
+            xlabel('Time [s]', 'FontSize', 18, 'Interpreter', 'latex');
+            if i <= 3
+                ylabel([state_names{i} ' [rad]'], 'FontSize', 18, 'Interpreter', 'latex');
+            else
+                ylabel([state_names{i} ' [rad/s]'], 'FontSize', 18, 'Interpreter', 'latex');
+            end
+            set(gca, 'FontSize', 11, 'LineWidth', 1.1, 'Box', 'on');
+            if i == 1
+                lgd = legend([h1 h2 h3], {'Real', 'EKF Predicted', 'Measurement'}, ...
+                    'Location', 'northoutside', 'Orientation', 'horizontal', ...
+                    'FontSize', 12, 'Interpreter', 'latex');
+                legend boxoff
+            end
+            end
 
+            set(gcf, 'Color', 'w', 'PaperPositionMode', 'auto');
+            % Remove whitespace by tightly fitting the figure to the subplots
+            set(gca, 'LooseInset', get(gca, 'TightInset'));
+            % Use exportgraphics for tight bounding box (R2020a+)
+            exportgraphics(gcf, 'ekf_simulation_results.png', 'Resolution', 300, 'BackgroundColor', 'white', 'ContentType', 'image');
+        end
 
 function [x_kk, P_kk] = ekf(x_kk, u_k1, z_k1, dt, P_kk, F_x, F_w, H_x, H_v, Q, R)
     % This function implements the Extended Kalman Filter (EKF) for the system
@@ -309,12 +321,12 @@ end
 function [x_k1k, z_k1k, P_k1k] = ekf_predict(dt, x_kk, u_k1, P_kk, F_x, F_w, Q)
     % Predict next state
     [~, x_ode] = ode45(@(t, x) dynamic_model(t, x, u_k1), [0, dt], x_kk);
-    x_k1k = x_ode(end, :)'
+    x_k1k = x_ode(end, :)';
     % Predict covariance estimate
     Fx_k = dt.*F_x(0, x_k1k, u_k1, zeros(6, 1)) + eye(6, 6);
     Fw_k = dt.*F_w(0, x_k1k, u_k1, zeros(6, 1)) + eye(6, 6);
     % Fw_k = F_w(0, x_k1k, u_k1, zeros(6, 1));
-    P_k1k = Fx_k * P_kk * Fx_k' + Q;
+    P_k1k = Fx_k * P_kk * Fx_k' + Fw_k * Q * Fw_k';
     % Predict measurement
     z_k1k = measurement_model(0, x_k1k, zeros(6, 1));
 
@@ -336,11 +348,11 @@ function [x_k1k1, P_k1k1] = ekf_correction(dt, x_k1k, z_k1k, P_k1k, H_x, H_v, z_
     %P_k1k1 = (eye(size(K_k1*H_x_k1)) - K_k1*H_x_k1)*P_k1k;
     tmp = K_k1*H_x_k1;
     I = eye(size(tmp));
-    P_k1k1 = (I - tmp) * P_k1k * (I - tmp)' + K_k1 * R * K_k1';
+    P_k1k1 = (I - tmp) * P_k1k * (I - tmp)' + K_k1 * R * K_k1'
 
 end
 
 angle_0 = 10/180*pi;  % Initial angle in radians
-simulate_system_ekf([angle_0; angle_0; angle_0; 0.01; 0.01; 0.01], [0; 0; 0], 0.01);
+simulate_system_ekf([angle_0; angle_0; angle_0; 0.01; 0.01; 0.01], [0; 0; 0], 0.05);
 
 % linearise_system([0; 0; 0; 0; 0; 0], [0; 0; 0]);
