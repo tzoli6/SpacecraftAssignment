@@ -16,8 +16,6 @@ function t = t_k(theta)
     t = [sin(theta(3)); cos(theta(2))*cos(theta(3)); sin(theta(2))*sin(theta(3))];
 end
 
-
-
 function C = C_d(theta)
     % This function computes the rotation matrix C_2 based on the angles theta
     % theta - 3x1 vector of angles
@@ -48,6 +46,7 @@ function d_x = dynamic_model(t, x, u)
     % State variables
     theta = x(1:3);
     omega = x(4:6);
+    % Disturbance 
 
     J = diag([2500, 2300, 3000]);
     n = sqrt(398600/(6378 + 700)^3);
@@ -111,7 +110,7 @@ function [A, B, K] = linearise_system(x0, u0)
     A_sym = jacobian(f, x);
     B_sym = jacobian(f, u);
 
-    A = double(subs(A_sym, [x; u], [x0; u0]))
+    A = double(subs(A_sym, [x; u], [x0; u0]));
     B = double(subs(B_sym, [x; u], [x0; u0]));
 
     model = ss(A, B, eye(6, 6), []);
@@ -120,11 +119,130 @@ function [A, B, K] = linearise_system(x0, u0)
     G.InputName = {'T_x', 'T_y', 'T_z'};
     G.OutputName = {'\theta_1', '\theta_2', '\theta_3', '\omega_1', '\omega_2', '\omega_3'};
 
-    K = place(A, B, [-1 -2 -3 -4 -5 -6]);
+    K = lqr(model,1e10*eye(6), eye(3));
 
     aug_model = ss(A-B*K, B, eye(6, 6), []);
 
-    impulse(aug_model);
+    % impulse(aug_model);
+    
+end
+
+function [] = fixed_structure_design()
+
+    [A, B, K_init] = linearise_system(zeros(6,1), zeros(3,1));
+
+    G = ss(A, B, eye(6), 0, 0.05);
+    eig(A-B*K_init)
+    G.InputName = {'T_x', 'T_y', 'T_z'};
+    G.OutputName = 'y';
+    % Sum block: e = y - r (6×1 signal)
+    Sum = sumblk('e = y - r', 6);
+
+    % Decoupler: maps 6 errors -> 3 PID inputs
+    K = tunableGain('Decoupler', K_init);  % 3x6
+    K.InputName = 'e';
+    K.OutputName = {'e_x', 'e_y', 'e_z'};
+
+    % PID controllers for each axis
+    C_x = tunablePID('C_x', 'pid', 0.05);
+    C_y = tunablePID('C_y', 'pid', 0.05);
+    C_z = tunablePID('C_z', 'pid', 0.05);
+
+    C_x.InputName = 'e_x';  C_x.OutputName = 'T_x';
+    C_y.InputName = 'e_y';  C_y.OutputName = 'T_y';
+    C_z.InputName = 'e_z';  C_z.OutputName = 'T_z';
+
+    % Connect all blocks
+    C0 = connect(K, C_x, C_y, C_z, Sum, {'y', 'r'}, {'T_x', 'T_y', 'T_z'});
+
+    % Open in Control System Tuner
+    wc = [0.6, 2];
+    [G,C,gam,info] = looptune(G, C0, wc)
+    cl = connect(G, C, 'r', 'y');
+    cl.InputName = {'r_1', 'r_2', 'r_3', 'r_4', 'r_5', 'r_6'};
+    cl.OutputName = {'\theta_1', '\theta_2', '\theta_3', '\omega_1', '\omega_2', '\omega_3'};
+    showTunable(C);
+    tf(C)
+    step(cl(:,1:3)) % Only show response to first three references
+    [num, den] = tfdata(C, 'v');
+    num = num(:, 2)
+
+end
+
+function [u, e_hist, u_hist] = controller(r, y, e_hist, u_hist)
+    % This function computes the control input based on the error and previous error
+    % x - state vector
+    % e_i - integral of error
+    % prev_error - previous error vector
+    % dt - time step
+
+    K = [
+      -1.011e+05   9.046e-10      -25.07  -1.013e+05   5.263e-10       49.81;
+        5.99e-11  -1.024e+05   1.204e-08   4.769e-10  -1.047e+05   1.219e-08;
+               1  -3.108e-07  -1.016e+05           1   -3.11e-07  -1.046e+05
+    ];
+         K = [-4.7010    0.0150   -1.3278   -2.2329    0.0091 -0.2894;
+    0.1349   -0.4609    0.2190    0.0307   -0.6905  0.0492;
+-0.9835    0.0097   -6.0186   -0.2255    0.0059 -2.7198];
+
+    e = y - r;
+    e = -1000*K*y
+
+    e_hist = [e e_hist(:, 1:end-1)];
+
+    den_x = [1 -0.9573 -0.0427];
+    den_y = [1 -1.8103  0.8103];
+    den_z = [1 -1.9371  0.9371];
+    
+    num_x = [         84.1770 -15.8497 -24.3530];
+    num_y = [-4.2000e-15 1.5652e-14 -1.5645e-14];
+    num_z = [         6.5551e-04 -0.0017 0.0010];
+
+    C_x = pid(-0.00105, -0.00835, 1.03e-05, 0.048, 0.05);
+    C_y = pid(0.00258, -0.00738, -0.000699, 0.264, 0.05);
+    C_z = pid(0.0014, -0.00931,  -0.000595, 0.795, 0.05);
+
+    [num_x, den_x] = tfdata(C_x, 'v');
+    [num_y, den_y] = tfdata(C_y, 'v');
+    [num_z, den_z] = tfdata(C_z, 'v');
+
+    T_x = num_x * e_hist(1, :)' - (den_x(2:end) * u_hist(1, :)');
+    T_y = num_y * e_hist(2, :)' - (den_y(2:end) * u_hist(2, :)');
+    T_z = num_z * e_hist(3, :)' - (den_z(2:end) * u_hist(3, :)');
+    u = [T_x; T_y; T_z]
+
+    u_hist =[u u_hist(:, 1:end-1)];  % Store the control input history
+
+    %u = - 1000* K * y  % Control input based on error
+
+    
+    % K = [
+    %      7.019e+04       -62.4      -4.411  -1.248e+05        1.94      0.1481;
+    %          88.72  -8.933e+04      0.2734       298.8  -1.221e+05     -0.2968;
+    %        -0.4931       34.83  -4.357e+04      0.8438      0.3711  -1.256e+05
+    % ];
+
+    % Kp = [-0.00143  -1.28e-5  0.00258]';
+    % Kd = [-0.0596 -0.0747 -0.349]';
+    % Ki = [-1.97e-7 -8.98e-12 -0.000875]';
+    % Tf = [2.27 1.9 7.18]';
+    
+    % e = y - r 
+
+    % e = 0.1 * K * e 
+
+    
+    % e_i = e_i + e * dt
+    % e_dot = (e - e_prev) / dt
+    % e_dot_f = (Tf .* e_dot_f_prev + e_dot .* dt) ./ (Tf + dt)
+
+    % u1 = Kp(1) * e(1) + Ki(1) * e_i(1) + Kd(1) * e_dot(1);
+    % u2 = Kp(2) * e(2) + Ki(2) * e_i(2) + Kd(2) * e_dot(2);
+    % u3 = Kp(3) * e(3) + Ki(3) * e_i(3) + Kd(3) * e_dot(3);
+    % u = [u1; u2; u3];
+
+    % e_prev = e;
+    % e_dot_f_prev = e_dot_f;
     
 end
 
@@ -243,11 +361,20 @@ function [] = simulate_system_ekf(x0, u, dt)
     x_predicted = [x_kk]; %#ok<*NBRAK2>
     x_measured =[x_kk];
     t_real = [0];
+    e_hist = zeros(3, 3); 
+    u_hist = zeros(3, 2); 
     
+    % Initialize controller variables
+    r = ones(6, 1);
+    e_i = zeros(3, 1);
+    e_prev = zeros(3, 1); 
+    e_dot_f_prev = zeros(3, 1);  
 
     for i = 1:1600
         % Calculate control input
-        u_kk = -1000.*K*x_kk;
+        % u_kk = -1000.*K*x_kk;
+
+       [u_kk, e_hist, u_hist] = controller(r, x, e_hist, u_hist);
 
         % Simulate the system for one time step
         [t, x] = ode45(@(t, x) dynamic_model(t, x, u_kk), ...
@@ -294,14 +421,14 @@ function [] = simulate_system_ekf(x0, u, dt)
                     'FontSize', 12, 'Interpreter', 'latex');
                 legend boxoff
             end
-            end
+        end
 
             set(gcf, 'Color', 'w', 'PaperPositionMode', 'auto');
             % Remove whitespace by tightly fitting the figure to the subplots
             set(gca, 'LooseInset', get(gca, 'TightInset'));
             % Use exportgraphics for tight bounding box (R2020a+)
             exportgraphics(gcf, 'ekf_simulation_results.png', 'Resolution', 300, 'BackgroundColor', 'white', 'ContentType', 'image');
-        end
+end
 
 function [x_kk, P_kk] = ekf(x_kk, u_k1, z_k1, dt, P_kk, F_x, F_w, H_x, H_v, Q, R)
     % This function implements the Extended Kalman Filter (EKF) for the system
@@ -348,11 +475,11 @@ function [x_k1k1, P_k1k1] = ekf_correction(dt, x_k1k, z_k1k, P_k1k, H_x, H_v, z_
     %P_k1k1 = (eye(size(K_k1*H_x_k1)) - K_k1*H_x_k1)*P_k1k;
     tmp = K_k1*H_x_k1;
     I = eye(size(tmp));
-    P_k1k1 = (I - tmp) * P_k1k * (I - tmp)' + K_k1 * R * K_k1'
+    P_k1k1 = (I - tmp) * P_k1k * (I - tmp)' + K_k1 * R * K_k1';
 
 end
 
-angle_0 = 10/180*pi;  % Initial angle in radians
+angle_0 = 1/180*pi;  % Initial angle in radians
 simulate_system_ekf([angle_0; angle_0; angle_0; 0.01; 0.01; 0.01], [0; 0; 0], 0.05);
-
+% fixed_structure_design();
 % linearise_system([0; 0; 0; 0; 0; 0], [0; 0; 0]);
